@@ -1,0 +1,5 @@
+# Raspberry Pi GPIO pin controol
+RPi.GPIO == 0.7.1
+
+# Pimoroni buttonshim
+buttonshim == 0.0.2
