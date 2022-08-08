@@ -1,87 +1,165 @@
-import RPi.GPIO as GPIO
+#!/usr/bin/env python
+
 import buttonshim
+import redis
+import RPi.GPIO as GPIO
 import signal
 import time
-from datetime import datetime, timezone, timedelta
-
-# Map relays to GPIO pins
-relay1 = 26
-relay2 = 20
-relay3 = 21
-
-# Setup GPIO to control relays
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(relay1,GPIO.OUT)
-GPIO.setup(relay2,GPIO.OUT)
-GPIO.setup(relay3,GPIO.OUT)
-
-# Default relay state (active-low)
-GPIO.output(relay1,True)
-GPIO.output(relay2,True)
-GPIO.output(relay3,True)
-
-# Button Shim definitions
-
-# Ensure hold state is set to False
-# button_a_held = False
-button_b_held = False
-button_c_held = False
-button_d_held = False
-button_e_held = False
-
-# Button A - used to move desk up manually
-# - button is held to move desk up, we don't need to implement an explicit hold
-#   as the action we want to perform requires keeping the button pressed
-@buttonshim.on_press(buttonshim.BUTTON_A)
-def button_a_press(button, pressed):
-    # global button_a_held
-    # button_a_held = False
-    buttonshim.set_pixel(255, 0, 0)
-    GPIO.output(relay1,False)
-    print(datetime.now(),"- Desk up started.")
-
-@buttonshim.on_release(buttonshim.BUTTON_A)
-def button_a_release(button, pressed):
-    # if not button_a_held:
-    #     print("Button A: Short press.")
-    GPIO.output(relay1,True)
-    buttonshim.set_pixel(0, 0, 0)
-    print(datetime.now(),"- Desk up ended.")
-
-# @buttonshim.on_hold(buttonshim.BUTTON_A, hold_time=1)
-# def button_a_hold(button):
-#     global button_a_held
-#     button_a_held = True
-
-# Button B - used to move desk down manually
-# - button is held to move desk down, we don't need to implement an explicit hold
-#   as the action we want to perform requires keeping the button pressed
-@buttonshim.on_press(buttonshim.BUTTON_B)
-def button_b_press(button, pressed):
-    # global button_b_held
-    # button_b_held = False
-    buttonshim.set_pixel(0, 255, 0)
-    GPIO.output(relay2,False)
-    print(datetime.now(),"- Desk down started.")
-
-@buttonshim.on_release(buttonshim.BUTTON_B)
-def button_b_release(button, pressed):
-    # if not button_b_held:
-    #     print("Button B: Short press.")
-    GPIO.output(relay2,True)
-    buttonshim.set_pixel(0, 0, 0)
-    print(datetime.now(),"- Desk down ended.")
-
-# Button C - used to move desk to seated height
-# Button D - used to move desk to standing height
-# Button E - used to make desk dance
 
 try:
-    while True:
-        signal.pause()
+    GPIO.setmode(GPIO.BCM)
 
-except  KeyboardInterrupt:
-    pass
+    PIN_TRIG = 4
+    PIN_ECHO = 17
 
-print("cleanup the things")
-GPIO.cleanup()
+    GPIO.setup(PIN_TRIG, GPIO.OUT)
+    GPIO.setup(PIN_ECHO, GPIO.IN)
+
+    GPIO.output(PIN_TRIG, False)
+
+    PIN_RELAY_UP = 26
+    PIN_RELAY_DN = 20
+
+    GPIO.setup(PIN_RELAY_UP, GPIO.OUT)
+    GPIO.setup(PIN_RELAY_DN, GPIO.OUT)
+
+    def desk_stop():
+        GPIO.output(PIN_RELAY_UP, True)
+        GPIO.output(PIN_RELAY_DN, True)
+
+    def desk_up():
+        GPIO.output(PIN_RELAY_UP, False)
+
+    def desk_down():
+        GPIO.output(PIN_RELAY_DN, False)
+
+    desk_stop()
+
+    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    current_height = float(0)
+    pulse_start_time = float(0)
+    pulse_start_time = float(0)
+
+    def get_height():
+        global current_height
+        global pulse_start_time
+        global pulse_start_time
+        time.sleep(0.5)
+        GPIO.output(PIN_TRIG, True)
+        time.sleep(0.00001)
+        GPIO.output(PIN_TRIG, False)
+        while GPIO.input(PIN_ECHO) == 0:
+            pulse_start_time = time.time()
+        while GPIO.input(PIN_ECHO) == 1:
+            pulse_end_time = time.time()
+        pulse_duration = pulse_end_time - pulse_start_time
+        current_height = round(pulse_duration * 17150, 2)
+        print("Current:", current_height, "cm")
+
+    # Allow sensor to settle before measuring the first time
+    get_height()
+
+    target_height = 0
+
+    def goto_preset():
+        global target_height
+        print("Target:", target_height, "cm")
+        if current_height > target_height:
+            while current_height > target_height:
+                desk_down()
+                time.sleep(0.1)
+                get_height()
+            desk_stop()
+        elif current_height < target_height:
+            while current_height < target_height:
+                desk_up()
+                time.sleep(0.2)
+                get_height()
+            desk_stop()
+
+    #########################################################
+    #   Button A - used to move desk to preset 1 (seated)   #
+    #########################################################
+
+    button_a_held = False
+
+    @buttonshim.on_press(buttonshim.BUTTON_A)
+    def button_a_press(button, pressed):
+        global button_a_held
+        button_a_held = False
+
+    @buttonshim.on_hold(buttonshim.BUTTON_A, hold_time=3)
+    def button_a_hold(button):
+        global button_a_held
+        button_a_held = True
+        buttonshim.set_pixel(64, 255, 64)
+        get_height()
+        r.set("preset_1", current_height)
+        time.sleep(3)
+        buttonshim.set_pixel(0, 0, 0)
+
+    @buttonshim.on_release(buttonshim.BUTTON_A)
+    def button_a_release(button, pressed):
+        if not button_a_held:
+            global target_height
+            target_height = float(r.get("preset_1"))
+            goto_preset()
+
+    #########################################################
+    #   Button B - used to move desk to preset 2 (standing) #
+    #########################################################
+
+    button_b_held = False
+
+    @buttonshim.on_press(buttonshim.BUTTON_B)
+    def button_b_press(button, pressed):
+        global button_b_held
+        button_b_held = False
+
+    @buttonshim.on_hold(buttonshim.BUTTON_B, hold_time=3)
+    def button_b_hold(button):
+        global button_b_held
+        button_b_held = True
+        buttonshim.set_pixel(64, 64, 256)
+        get_height()
+        r.set("preset_2", current_height)
+        time.sleep(3)
+        buttonshim.set_pixel(0, 0, 0)
+
+    @buttonshim.on_release(buttonshim.BUTTON_B)
+    def button_b_release(button, pressed):
+        if not button_b_held:
+            global target_height
+            target_height = float(r.get("preset_2"))
+            goto_preset()
+
+    #########################################################
+    #   Button D - used to move desk down manually          #
+    #########################################################
+    @buttonshim.on_press(buttonshim.BUTTON_D)
+    def button_d_press(button, pressed):
+        desk_down()
+
+    @buttonshim.on_release(buttonshim.BUTTON_D)
+    def button_d_release(button, pressed):
+        desk_stop()
+        time.sleep(2)
+        get_height()
+
+    #########################################################
+    #   Button E - used to move desk up manually            #
+    #########################################################
+    @buttonshim.on_press(buttonshim.BUTTON_E)
+    def button_e_press(button, pressed):
+        desk_up()
+
+    @buttonshim.on_release(buttonshim.BUTTON_E)
+    def button_e_release(button, pressed):
+        desk_stop()
+        time.sleep(2)
+        get_height()
+
+    signal.pause()
+
+finally:
+    GPIO.cleanup()
